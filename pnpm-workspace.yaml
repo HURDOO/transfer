@@ -1,0 +1,7 @@
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - "@fastify/static@10.1.2"
+  - "@vitejs/plugin-react@6.0.4"
+  - react-dom@19.2.8
+  - react@19.2.8

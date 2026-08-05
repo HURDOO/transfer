@@ -1,0 +1,9 @@
+# Project-local Codex defaults. Explicit thread choices can override these values.
+model_reasoning_effort = "high"
+service_tier = "fast"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[agents]
+max_threads = 4
+max_depth = 1
