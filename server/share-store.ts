@@ -64,6 +64,7 @@ export interface ShareReservation {
 interface ShareStoreOptions {
   now?: () => number;
   codeGenerator?: () => string;
+  isCodeUnavailable?: (code: string) => boolean;
   staleReservationMs?: number;
 }
 
@@ -95,6 +96,7 @@ export class ShareStore {
 
   private readonly now: () => number;
   private readonly codeGenerator: () => string;
+  private readonly isCodeUnavailable: (code: string) => boolean;
   private readonly staleReservationMs: number;
   private readonly activeReservations = new Set<string>();
   private database: DatabaseSync | null = null;
@@ -106,6 +108,7 @@ export class ShareStore {
     this.filesDirectory = path.join(this.rootDirectory, "files");
     this.now = options.now ?? Date.now;
     this.codeGenerator = options.codeGenerator ?? createShareCode;
+    this.isCodeUnavailable = options.isCodeUnavailable ?? (() => false);
     this.staleReservationMs =
       options.staleReservationMs ?? DEFAULT_STALE_RESERVATION_MS;
   }
@@ -197,6 +200,9 @@ export class ShareStore {
         const code = this.codeGenerator();
         if (!CODE_PATTERN.test(code)) {
           throw new Error("The share code generator returned an invalid code.");
+        }
+        if (this.isCodeUnavailable(code)) {
+          continue;
         }
 
         database.exec("BEGIN IMMEDIATE");
@@ -333,6 +339,16 @@ export class ShareStore {
         mimeType: file.mime_type,
       })),
     };
+  }
+
+  hasActiveCode(code: string): boolean {
+    if (!CODE_PATTERN.test(code)) return false;
+    const rawShare = this.getDatabase()
+      .prepare("SELECT expires_at FROM shares WHERE code = ?")
+      .get(code);
+    if (!rawShare || !isRecord(rawShare)) return false;
+    const expiresAt = rawShare.expires_at;
+    return isNullableString(expiresAt) && !isExpired(expiresAt, this.now());
   }
 
   getStoredFilePath(shareId: string, fileId: string): string | null {

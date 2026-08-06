@@ -11,6 +11,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_TEXT_BYTES,
   type ApiErrorResponse,
+  type CreateLiveSessionResponse,
+  type JoinLiveSessionResponse,
+  type LiveClientSignal,
+  type PollLiveSignalsResponse,
+  type ResolveCodeResponse,
   type ShareResponse,
 } from "../shared/contracts.js";
 import { buildApp } from "./app.js";
@@ -34,6 +39,8 @@ interface TestAppOptions {
   serveClient?: boolean;
   clientDirectory?: string;
   appBaseUrl?: string | false;
+  shareCodeGenerator?: () => string;
+  liveCodeGenerator?: () => string;
   createFileWriteStream?: (targetPath: string) => Writable;
 }
 
@@ -68,6 +75,8 @@ describe("share API", () => {
       uploadTimeoutMs: options.uploadTimeoutMs,
       serveClient: options.serveClient,
       clientDirectory: options.clientDirectory,
+      shareCodeGenerator: options.shareCodeGenerator,
+      liveCodeGenerator: options.liveCodeGenerator,
       createFileWriteStream: options.createFileWriteStream,
       now: () => Date.UTC(2026, 6, 22, 12, 0, 0),
     });
@@ -185,6 +194,218 @@ describe("share API", () => {
     const created = responses.map((response) => response.json<ShareResponse>());
     expect(new Set(created.map((share) => share.code)).size).toBe(8);
     expect(readShareCount(storageDirectory)).toBe(8);
+  });
+
+  it("resolves one receive code and keeps stored and live codes unique", async () => {
+    const storedCodes = ["700001", "700002", "700003"];
+    const liveCodes = ["700001", "700002"];
+    const app = await createApp({
+      shareCodeGenerator: () => storedCodes.shift()!,
+      liveCodeGenerator: () => liveCodes.shift()!,
+    });
+
+    const firstMultipart = encodeMultipart([
+      { name: "expiresIn", value: "1d" },
+      { name: "text", value: "stored-first" },
+    ]);
+    const firstStoredResponse = await app.inject({
+      method: "POST",
+      url: "/api/shares",
+      headers: firstMultipart.headers,
+      payload: firstMultipart.payload,
+    });
+    expect(firstStoredResponse.statusCode).toBe(201);
+    expect(firstStoredResponse.json<ShareResponse>().code).toBe("700001");
+
+    const storedResolveResponse = await app.inject({
+      method: "GET",
+      url: "/api/codes/700001",
+    });
+    expect(storedResolveResponse.statusCode).toBe(200);
+    expect(storedResolveResponse.headers["cache-control"]).toBe("no-store");
+    expect(storedResolveResponse.json<ResolveCodeResponse>()).toEqual({
+      code: "700001",
+      kind: "stored",
+    });
+
+    const liveCreateResponse = await app.inject({
+      method: "POST",
+      url: "/api/live-sessions",
+    });
+    expect(liveCreateResponse.statusCode).toBe(201);
+    expect(liveCreateResponse.json<CreateLiveSessionResponse>().code).toBe(
+      "700002",
+    );
+
+    const liveResolveResponse = await app.inject({
+      method: "GET",
+      url: "/api/codes/700002",
+    });
+    expect(liveResolveResponse.statusCode).toBe(200);
+    expect(liveResolveResponse.json<ResolveCodeResponse>()).toEqual({
+      code: "700002",
+      kind: "live",
+    });
+
+    const secondMultipart = encodeMultipart([
+      { name: "expiresIn", value: "1d" },
+      { name: "text", value: "stored-second" },
+    ]);
+    const secondStoredResponse = await app.inject({
+      method: "POST",
+      url: "/api/shares",
+      headers: secondMultipart.headers,
+      payload: secondMultipart.payload,
+    });
+    expect(secondStoredResponse.statusCode).toBe(201);
+    expect(secondStoredResponse.json<ShareResponse>().code).toBe("700003");
+
+    const missingResponse = await app.inject({
+      method: "GET",
+      url: "/api/codes/999999",
+    });
+    expect(missingResponse.statusCode).toBe(404);
+    expect(missingResponse.json<ApiErrorResponse>().error.code).toBe(
+      "CODE_NOT_FOUND",
+    );
+
+    const malformedResponse = await app.inject({
+      method: "GET",
+      url: "/api/codes/not-a-code",
+    });
+    expect(malformedResponse.statusCode).toBe(400);
+    expect(malformedResponse.json<ApiErrorResponse>().error.code).toBe(
+      "INVALID_INPUT",
+    );
+  });
+
+  it("coordinates a memory-only live session without storing the text payload", async () => {
+    const app = await createApp();
+    const storageDirectory = storageDirectories.at(-1)!;
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/live-sessions",
+    });
+    expect(createResponse.statusCode).toBe(201);
+    expect(createResponse.headers["cache-control"]).toBe("no-store");
+    const created = createResponse.json<CreateLiveSessionResponse>();
+    expect(created.code).toMatch(/^\d{6}$/);
+    expect(created.liveUrl).toBe(`https://transfer.test/live/${created.code}`);
+    expect(created.senderToken).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    expect(created.iceServers).toEqual([]);
+
+    const joinResponse = await app.inject({
+      method: "POST",
+      url: `/api/live-sessions/${created.code}/join`,
+    });
+    expect(joinResponse.statusCode).toBe(201);
+    const joined = joinResponse.json<JoinLiveSessionResponse>();
+    expect(joined.receiverToken).toMatch(/^[A-Za-z0-9_-]{32}$/);
+
+    const readyResponse = await app.inject({
+      method: "GET",
+      url: `/api/live-sessions/${created.code}/signals?token=${created.senderToken}&after=0`,
+    });
+    expect(readyResponse.statusCode).toBe(200);
+    expect(readyResponse.json<PollLiveSignalsResponse>().messages).toEqual([
+      { sequence: 1, signal: { type: "peer-ready" } },
+    ]);
+
+    const offer: LiveClientSignal = {
+      type: "description",
+      description: { type: "offer", sdp: "offer-sdp" },
+    };
+    const offerResponse = await app.inject({
+      method: "POST",
+      url: `/api/live-sessions/${created.code}/signals`,
+      payload: { token: created.senderToken, signal: offer },
+    });
+    expect(offerResponse.statusCode).toBe(202);
+
+    const receiverSignals = await app.inject({
+      method: "GET",
+      url: `/api/live-sessions/${created.code}/signals?token=${joined.receiverToken}&after=0`,
+    });
+    expect(receiverSignals.json<PollLiveSignalsResponse>().messages).toEqual([
+      { sequence: 2, signal: offer },
+    ]);
+
+    const answer: LiveClientSignal = {
+      type: "description",
+      description: { type: "answer", sdp: "answer-sdp" },
+    };
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: `/api/live-sessions/${created.code}/signals`,
+          payload: { token: joined.receiverToken, signal: answer },
+        })
+      ).statusCode,
+    ).toBe(202);
+
+    const senderSignals = await app.inject({
+      method: "GET",
+      url: `/api/live-sessions/${created.code}/signals?token=${created.senderToken}&after=1`,
+    });
+    expect(senderSignals.json<PollLiveSignalsResponse>().messages).toEqual([
+      { sequence: 3, signal: answer },
+    ]);
+
+    const secondJoin = await app.inject({
+      method: "POST",
+      url: `/api/live-sessions/${created.code}/join`,
+    });
+    expect(secondJoin.statusCode).toBe(409);
+    expect(secondJoin.json<ApiErrorResponse>().error.code).toBe(
+      "LIVE_SESSION_UNAVAILABLE",
+    );
+
+    expect(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: `/api/live-sessions/${created.code}?token=${created.senderToken}`,
+        })
+      ).statusCode,
+    ).toBe(204);
+    const closedCodeResponse = await app.inject({
+      method: "GET",
+      url: `/api/codes/${created.code}`,
+    });
+    expect(closedCodeResponse.statusCode).toBe(404);
+    expect(closedCodeResponse.json<ApiErrorResponse>().error.code).toBe(
+      "CODE_NOT_FOUND",
+    );
+    expect(readShareCount(storageDirectory)).toBe(0);
+  });
+
+  it("validates live signaling bodies and hides invalid peer tokens", async () => {
+    const app = await createApp();
+    const created = (
+      await app.inject({ method: "POST", url: "/api/live-sessions" })
+    ).json<CreateLiveSessionResponse>();
+
+    const malformed = await app.inject({
+      method: "POST",
+      url: `/api/live-sessions/${created.code}/signals`,
+      payload: {
+        token: created.senderToken,
+        signal: { type: "description", description: { type: "offer" } },
+      },
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json<ApiErrorResponse>().error.code).toBe("INVALID_INPUT");
+
+    const invalidToken = await app.inject({
+      method: "GET",
+      url: `/api/live-sessions/${created.code}/signals?token=${"x".repeat(32)}&after=0`,
+    });
+    expect(invalidToken.statusCode).toBe(404);
+    expect(invalidToken.json<ApiErrorResponse>().error.code).toBe(
+      "LIVE_SESSION_NOT_FOUND",
+    );
   });
 
   it("returns 400 for a share with neither text nor files", async () => {
@@ -352,6 +573,41 @@ describe("share API", () => {
       "INVALID_MULTIPART",
     );
     await waitForStorageToBeEmpty(storageDirectory);
+  });
+
+  it("finishes writing a fully received file after the request input closes normally", async () => {
+    const app = await createApp({
+      createFileWriteStream: () =>
+        new Writable({
+          write(_chunk, _encoding, callback) {
+            setTimeout(callback, 25);
+          },
+        }),
+    });
+    const multipart = encodeMultipart(
+      [{ name: "expiresIn", value: "1d" }],
+      [
+        {
+          name: "files",
+          fileName: "buffered.bin",
+          contentType: "application/octet-stream",
+          contents: Buffer.alloc(256 * 1024, 0x5a),
+        },
+      ],
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/shares",
+      headers: multipart.headers,
+      payload: multipart.payload,
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json<ShareResponse>()).toMatchObject({
+      totalBytes: 256 * 1024,
+      files: [{ name: "buffered.bin", size: 256 * 1024 }],
+    });
   });
 
   it("returns a generic 500 and removes partial data after a disk write failure", async () => {

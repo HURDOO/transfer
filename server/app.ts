@@ -20,15 +20,26 @@ import {
   MAX_TEXT_BYTES,
   isExpirationValue,
   type ApiErrorResponse,
+  type CreateLiveSessionResponse,
   type ExpirationValue,
+  type JoinLiveSessionResponse,
+  type LiveClientSignal,
+  type LiveIceCandidate,
+  type LiveIceServer,
+  type PollLiveSignalsResponse,
+  type ResolveCodeResponse,
   type ShareResponse,
 } from "../shared/contracts.js";
 import {
   AppError,
   invalidInput,
+  liveSessionNotFound,
+  liveSessionUnavailable,
   payloadTooLarge,
+  receiveCodeNotFound,
   shareNotFound,
 } from "./errors.js";
+import { LiveSessionStore } from "./live-session-store.js";
 import {
   sanitizeFileName,
   ShareStore,
@@ -36,6 +47,7 @@ import {
   type StoredFile,
   type StoredShare,
 } from "./share-store.js";
+import { createUploadRequestSignal } from "./upload-request-signal.js";
 
 const CODE_PATTERN = /^\d{6}$/;
 const CLEANUP_INTERVAL_MS = 30 * 60 * 1_000;
@@ -53,6 +65,9 @@ interface BuildAppOptions {
   uploadTimeoutMs?: number;
   now?: () => number;
   createFileWriteStream?: (targetPath: string) => Writable;
+  liveIceServers?: LiveIceServer[];
+  shareCodeGenerator?: () => string;
+  liveCodeGenerator?: () => string;
 }
 
 interface ShareParams {
@@ -61,6 +76,15 @@ interface ShareParams {
 
 interface FileParams extends ShareParams {
   fileId: string;
+}
+
+interface LiveSignalQuery {
+  token?: string;
+  after?: string;
+}
+
+interface LiveCloseQuery {
+  token?: string;
 }
 
 interface UploadState {
@@ -106,7 +130,19 @@ export async function buildApp(
       connectionsCheckingInterval: Math.min(uploadTimeoutMs, 30_000),
     },
   });
-  const store = new ShareStore(options.storageDirectory, { now: options.now });
+  let isStoredCodeUnavailable = (_code: string) => false;
+  const liveSessions = new LiveSessionStore({
+    now: options.now,
+    createCode: options.liveCodeGenerator,
+    isCodeUnavailable: (code) => isStoredCodeUnavailable(code),
+  });
+  const store = new ShareStore(options.storageDirectory, {
+    now: options.now,
+    codeGenerator: options.shareCodeGenerator,
+    isCodeUnavailable: (code) => liveSessions.hasActiveCode(code),
+  });
+  isStoredCodeUnavailable = (code) => store.hasActiveCode(code);
+  const liveIceServers = options.liveIceServers ?? [];
   const useRateLimit = options.rateLimit ?? true;
 
   await store.initialize();
@@ -183,6 +219,15 @@ export async function buildApp(
       );
     }
 
+    if (errorCode === "ABORT_ERR") {
+      return sendError(
+        reply,
+        400,
+        "UPLOAD_ABORTED",
+        "업로드 연결이 끊어졌어요. 다시 시도해 주세요.",
+      );
+    }
+
     if (errorStatusCode === 413 || errorCode === "FST_REQ_FILE_TOO_LARGE") {
       return sendError(
         reply,
@@ -224,6 +269,154 @@ export async function buildApp(
   });
 
   app.get("/api/health", async () => ({ status: "ok" }));
+
+  app.get<{ Params: ShareParams }>(
+    "/api/codes/:code",
+    {
+      config: useRateLimit
+        ? { rateLimit: { max: 60, timeWindow: "1 minute" } }
+        : undefined,
+    },
+    async (request, reply) => {
+      ensureSixDigitCode(request.params.code);
+      let response: ResolveCodeResponse;
+      if (liveSessions.hasActiveCode(request.params.code)) {
+        response = { code: request.params.code, kind: "live" };
+      } else if (store.hasActiveCode(request.params.code)) {
+        response = { code: request.params.code, kind: "stored" };
+      } else {
+        throw receiveCodeNotFound();
+      }
+      reply.header("Cache-Control", "no-store");
+      return response;
+    },
+  );
+
+  app.post(
+    "/api/live-sessions",
+    {
+      bodyLimit: 1_024,
+      config: useRateLimit
+        ? { rateLimit: { max: 10, timeWindow: "1 minute" } }
+        : undefined,
+    },
+    async (request, reply) => {
+      const session = liveSessions.create();
+      if (!session) {
+        throw new AppError(
+          503,
+          "LIVE_SESSION_CAPACITY",
+          "실시간 연결이 가득 찼어요. 잠시 후 다시 시도해 주세요.",
+        );
+      }
+
+      const liveUrl = new URL(
+        `/live/${session.code}`,
+        getBaseUrl(request, appBaseUrl),
+      );
+      const response: CreateLiveSessionResponse = {
+        code: session.code,
+        liveUrl: liveUrl.toString(),
+        expiresAt: session.expiresAt,
+        senderToken: session.senderToken,
+        iceServers: liveIceServers,
+      };
+      reply.header("Cache-Control", "no-store");
+      return reply.code(201).send(response);
+    },
+  );
+
+  app.post<{ Params: ShareParams }>(
+    "/api/live-sessions/:code/join",
+    {
+      bodyLimit: 1_024,
+      config: useRateLimit
+        ? { rateLimit: { max: 30, timeWindow: "1 minute" } }
+        : undefined,
+    },
+    async (request, reply) => {
+      ensureSixDigitCode(request.params.code);
+      const result = liveSessions.join(request.params.code);
+      if (result.status === "not-found") {
+        throw liveSessionNotFound();
+      }
+      if (result.status === "occupied") {
+        throw liveSessionUnavailable();
+      }
+
+      const response: JoinLiveSessionResponse = {
+        code: result.session.code,
+        expiresAt: result.session.expiresAt,
+        receiverToken: result.session.receiverToken,
+        iceServers: liveIceServers,
+      };
+      reply.header("Cache-Control", "no-store");
+      return reply.code(201).send(response);
+    },
+  );
+
+  app.post<{ Params: ShareParams; Body: unknown }>(
+    "/api/live-sessions/:code/signals",
+    {
+      bodyLimit: 72 * 1_024,
+      config: useRateLimit
+        ? { rateLimit: { max: 240, timeWindow: "1 minute" } }
+        : undefined,
+    },
+    async (request, reply) => {
+      ensureSixDigitCode(request.params.code);
+      const { token, signal } = parseLiveSignalRequest(request.body);
+      const result = liveSessions.postSignal(
+        request.params.code,
+        token,
+        signal,
+      );
+      if (result.status === "not-found") {
+        throw liveSessionNotFound();
+      }
+      reply.header("Cache-Control", "no-store");
+      return reply.code(202).send({ status: "accepted" });
+    },
+  );
+
+  app.get<{ Params: ShareParams; Querystring: LiveSignalQuery }>(
+    "/api/live-sessions/:code/signals",
+    {
+      config: useRateLimit
+        ? { rateLimit: { max: 240, timeWindow: "1 minute" } }
+        : undefined,
+    },
+    async (request, reply) => {
+      ensureSixDigitCode(request.params.code);
+      const token = parseLiveToken(request.query.token);
+      const after = parseSignalCursor(request.query.after);
+      const result = liveSessions.poll(request.params.code, token, after);
+      if (result.status === "not-found") {
+        throw liveSessionNotFound();
+      }
+
+      const response: PollLiveSignalsResponse = {
+        expiresAt: result.expiresAt,
+        messages: result.messages,
+      };
+      reply.header("Cache-Control", "no-store");
+      return response;
+    },
+  );
+
+  app.delete<{ Params: ShareParams; Querystring: LiveCloseQuery }>(
+    "/api/live-sessions/:code",
+    async (request, reply) => {
+      ensureSixDigitCode(request.params.code);
+      const token = parseLiveToken(request.query.token);
+      const result = liveSessions.close(request.params.code, token);
+      if (result.status === "not-found") {
+        throw liveSessionNotFound();
+      }
+      reply.header("Cache-Control", "no-store");
+      return reply.code(204).send();
+    },
+  );
 
   app.post(
     "/api/shares",
@@ -367,6 +560,7 @@ export async function buildApp(
   const cleanupIntervalMs = options.cleanupIntervalMs ?? CLEANUP_INTERVAL_MS;
   if (cleanupIntervalMs !== false) {
     const timer = setInterval(() => {
+      liveSessions.cleanup();
       void store.cleanup().catch((error: unknown) => {
         app.log.error(error, "Failed to clean expired shares");
       });
@@ -410,17 +604,18 @@ async function receiveUpload(
     );
   }, uploadTimeoutMs);
   uploadTimer.unref();
-  const parts = request.parts({
-    limits: {
-      fields: 2,
-      files: MAX_FILES,
-      parts: MAX_FILES + 2,
-      fileSize: maxShareBytes,
-      fieldSize: MAX_TEXT_BYTES,
-    },
-  });
+  const uploadRequest = createUploadRequestSignal(request.raw);
 
   try {
+    const parts = request.parts({
+      limits: {
+        fields: 2,
+        files: MAX_FILES,
+        parts: MAX_FILES + 2,
+        fileSize: maxShareBytes,
+        fieldSize: MAX_TEXT_BYTES,
+      },
+    });
     for await (const part of parts) {
       if (part.type === "field") {
         const value =
@@ -492,7 +687,7 @@ async function receiveUpload(
         part.file,
         byteLimiter,
         createFileWriteStream(target.path),
-        { signal: request.signal },
+        { signal: uploadRequest.signal },
       );
       if (part.file.truncated) {
         throw payloadTooLarge();
@@ -518,6 +713,7 @@ async function receiveUpload(
     if (forcedError) throw forcedError;
     throw error;
   } finally {
+    uploadRequest.dispose();
     clearTimeout(uploadTimer);
   }
 }
@@ -534,6 +730,105 @@ async function findShare(
     throw shareNotFound();
   }
   return share;
+}
+
+function ensureSixDigitCode(code: string): void {
+  if (!CODE_PATTERN.test(code)) {
+    throw invalidInput("6자리 숫자를 입력해 주세요.");
+  }
+}
+
+function parseLiveSignalRequest(body: unknown): {
+  token: string;
+  signal: LiveClientSignal;
+} {
+  if (!isRecord(body)) {
+    throw invalidInput("실시간 연결 요청 형식을 확인해 주세요.");
+  }
+  const token = parseLiveToken(body.token);
+  if (!isRecord(body.signal) || typeof body.signal.type !== "string") {
+    throw invalidInput("실시간 연결 요청 형식을 확인해 주세요.");
+  }
+
+  if (body.signal.type === "description") {
+    const description = body.signal.description;
+    if (
+      !isRecord(description) ||
+      (description.type !== "offer" && description.type !== "answer") ||
+      typeof description.sdp !== "string" ||
+      description.sdp.length === 0 ||
+      Buffer.byteLength(description.sdp, "utf8") > 64 * 1_024
+    ) {
+      throw invalidInput("연결 설명을 확인해 주세요.");
+    }
+    return {
+      token,
+      signal: {
+        type: "description",
+        description: { type: description.type, sdp: description.sdp },
+      },
+    };
+  }
+
+  if (body.signal.type === "candidate") {
+    const candidate = parseLiveIceCandidate(body.signal.candidate);
+    return { token, signal: { type: "candidate", candidate } };
+  }
+
+  throw invalidInput("지원하지 않는 실시간 연결 신호예요.");
+}
+
+function parseLiveIceCandidate(value: unknown): LiveIceCandidate {
+  if (
+    !isRecord(value) ||
+    typeof value.candidate !== "string" ||
+    value.candidate.length === 0 ||
+    Buffer.byteLength(value.candidate, "utf8") > 4 * 1_024 ||
+    !isNullableString(value.sdpMid) ||
+    !isNullableInteger(value.sdpMLineIndex) ||
+    !isNullableString(value.usernameFragment)
+  ) {
+    throw invalidInput("연결 후보 정보를 확인해 주세요.");
+  }
+  return {
+    candidate: value.candidate,
+    sdpMid: value.sdpMid,
+    sdpMLineIndex: value.sdpMLineIndex,
+    usernameFragment: value.usernameFragment,
+  };
+}
+
+function parseLiveToken(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(value)) {
+    throw liveSessionNotFound();
+  }
+  return value;
+}
+
+function parseSignalCursor(value: unknown): number {
+  if (value === undefined) {
+    return 0;
+  }
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw invalidInput("실시간 연결 순서를 확인해 주세요.");
+  }
+  const cursor = Number(value);
+  if (!Number.isSafeInteger(cursor)) {
+    throw invalidInput("실시간 연결 순서를 확인해 주세요.");
+  }
+  return cursor;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNullableInteger(value: unknown): value is number | null {
+  return value === null || Number.isInteger(value);
 }
 
 function getExpirationDate(

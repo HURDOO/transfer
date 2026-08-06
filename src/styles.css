@@ -260,6 +260,34 @@ main {
   box-shadow: 0 3px 12px rgba(0, 0, 0, 0.25);
 }
 
+.delivery-switch {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: -18px 0 30px;
+}
+
+.delivery-switch button {
+  min-height: 38px;
+  padding: 0 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 670;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    color 150ms ease;
+}
+
+.delivery-switch button.active {
+  border-color: color-mix(in srgb, var(--primary) 48%, var(--border));
+  background: var(--primary-soft);
+  color: var(--primary-on-soft);
+}
+
 .panel-intro {
   margin-bottom: 28px;
 }
@@ -359,6 +387,51 @@ p {
 
 .content-area {
   min-width: 0;
+}
+
+.live-explainer {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin-bottom: 22px;
+  padding: 14px 15px;
+  border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--primary-soft) 64%, var(--surface));
+}
+
+.live-mark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 38px;
+  border-radius: 12px;
+  background: var(--primary-action);
+  color: white;
+}
+
+.live-mark svg {
+  width: 19px;
+  height: 19px;
+}
+
+.live-explainer > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.live-explainer strong {
+  font-size: 0.9rem;
+  letter-spacing: -0.015em;
+}
+
+.live-explainer > div > span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
 }
 
 .dropzone {
@@ -693,6 +766,30 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
+.live-transfer-progress {
+  margin: 0 0 22px;
+  padding: 15px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.live-transfer-progress .progress-copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-bytes {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 progress {
   width: 100%;
   height: 7px;
@@ -791,6 +888,115 @@ progress::-moz-progress-bar {
 .receive-form .primary-button {
   width: 100%;
   margin-top: 24px;
+}
+
+.live-status-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 15px;
+  margin-bottom: 26px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface-subtle);
+}
+
+.live-status-card.sent {
+  border-color: color-mix(in srgb, var(--success) 32%, var(--border));
+  background: var(--success-soft);
+}
+
+.live-status-symbol {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  border-radius: 14px;
+  background: var(--primary-soft);
+  color: var(--primary-on-soft);
+}
+
+.live-status-card.sent .live-status-symbol {
+  background: var(--surface);
+  color: var(--success);
+}
+
+.live-status-symbol svg {
+  width: 22px;
+  height: 22px;
+  stroke-width: 2.2;
+}
+
+.live-pulse {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 38%, transparent);
+  animation: live-pulse 1.6s ease-out infinite;
+}
+
+.live-status-card h1 {
+  margin: 0;
+  font-size: clamp(1.45rem, 4vw, 1.9rem);
+  line-height: 1.25;
+  letter-spacing: -0.04em;
+}
+
+.live-status-card p:last-child {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+.live-expiration {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.live-connection-motion {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 24px;
+  color: var(--primary);
+}
+
+.live-connection-motion span {
+  width: 54px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary));
+  opacity: 0.7;
+}
+
+.live-connection-motion span:last-child {
+  background: linear-gradient(90deg, var(--primary), transparent);
+}
+
+.live-connection-motion svg {
+  width: 32px;
+  height: 32px;
+  animation: live-breathe 1.35s ease-in-out infinite alternate;
+}
+
+.live-received .received-icon {
+  background: var(--primary-soft);
+  color: var(--primary-on-soft);
+}
+
+.live-connecting .live-transfer-progress {
+  width: min(100%, 420px);
+  margin-top: 22px;
+}
+
+.live-connecting > .secondary-button {
+  margin-top: 22px;
 }
 
 .code-label {
@@ -1134,6 +1340,20 @@ progress::-moz-progress-bar {
   }
 }
 
+@keyframes live-pulse {
+  70%,
+  100% {
+    box-shadow: 0 0 0 12px transparent;
+  }
+}
+
+@keyframes live-breathe {
+  to {
+    opacity: 0.45;
+    transform: scale(0.92);
+  }
+}
+
 .muted {
   color: var(--muted);
 }
@@ -1152,6 +1372,11 @@ progress::-moz-progress-bar {
 .large-status-icon svg {
   width: 27px;
   height: 27px;
+}
+
+.completed-view .large-status-icon {
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .error-view .eyebrow {

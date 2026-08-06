@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { buildApp } from "./app.js";
+import { parseLiveIceServers } from "./live-ice-config.js";
 
 const port = parsePort(process.env.PORT);
 // Bind all interfaces by default so devices on the local network can connect.
@@ -13,6 +14,7 @@ const app = await buildApp({
   appBaseUrl: process.env.APP_BASE_URL,
   logger: true,
   serveClient: process.env.NODE_ENV === "production",
+  liveIceServers: parseLiveIceServers(process.env.LIVE_ICE_SERVERS),
 });
 
 const shutdown = async (signal: string) => {

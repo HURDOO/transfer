@@ -147,6 +147,29 @@ describe("ShareStore", () => {
     expect(second.code).toMatch(/^\d{6}$/);
   });
 
+  it("skips codes reserved by an active live session", async () => {
+    const generatedCodes = ["700001", "700002"];
+    const directory = await createStorageDirectory();
+    const store = track(
+      new ShareStore(directory, {
+        codeGenerator: () => generatedCodes.shift()!,
+        isCodeUnavailable: (code) => code === "700001",
+      }),
+    );
+    const reservation = await store.reserve();
+    const created = await store.commit(reservation, {
+      createdAt: new Date(FIXED_TIME).toISOString(),
+      expiresAt: null,
+      text: "stored",
+      totalBytes: 6,
+      files: [],
+    });
+
+    expect(created.code).toBe("700002");
+    expect(store.hasActiveCode("700002")).toBe(true);
+    expect(store.hasActiveCode("invalid")).toBe(false);
+  });
+
   it("removes crash orphans immediately during startup cleanup", async () => {
     const directory = await createStorageDirectory();
     const store = track(new ShareStore(directory, { now: () => FIXED_TIME }));

@@ -1,6 +1,11 @@
 import type {
   ApiErrorResponse,
+  CreateLiveSessionResponse,
   ExpirationValue,
+  JoinLiveSessionResponse,
+  LiveClientSignal,
+  PollLiveSignalsResponse,
+  ResolveCodeResponse,
   ShareResponse,
 } from "../shared/contracts";
 
@@ -112,6 +117,136 @@ export async function getShare(
   return body;
 }
 
+export async function resolveReceiveCode(
+  code: string,
+  signal?: AbortSignal,
+): Promise<ResolveCodeResponse> {
+  const body = await requestJson(`/api/codes/${encodeURIComponent(code)}`, {
+    signal,
+  });
+  if (!isResolveCodeResponse(body)) {
+    throw new ApiClientError(
+      "코드 종류를 확인하지 못했어요. 다시 시도해 주세요.",
+      "INVALID_RESPONSE",
+    );
+  }
+  return body;
+}
+
+export async function createLiveSession(
+  signal?: AbortSignal,
+): Promise<CreateLiveSessionResponse> {
+  const body = await requestJson("/api/live-sessions", {
+    method: "POST",
+    signal,
+  });
+  if (!isCreateLiveSessionResponse(body)) {
+    throw new ApiClientError(
+      "실시간 연결을 만들지 못했어요. 다시 시도해 주세요.",
+      "INVALID_RESPONSE",
+    );
+  }
+  return body;
+}
+
+export async function joinLiveSession(
+  code: string,
+  signal?: AbortSignal,
+): Promise<JoinLiveSessionResponse> {
+  const body = await requestJson(
+    `/api/live-sessions/${encodeURIComponent(code)}/join`,
+    { method: "POST", signal },
+  );
+  if (!isJoinLiveSessionResponse(body)) {
+    throw new ApiClientError(
+      "실시간 연결에 들어가지 못했어요. 다시 시도해 주세요.",
+      "INVALID_RESPONSE",
+    );
+  }
+  return body;
+}
+
+export async function postLiveSignal(
+  code: string,
+  token: string,
+  signalMessage: LiveClientSignal,
+  signal?: AbortSignal,
+): Promise<void> {
+  await requestJson(`/api/live-sessions/${encodeURIComponent(code)}/signals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, signal: signalMessage }),
+    signal,
+  });
+}
+
+export async function pollLiveSignals(
+  code: string,
+  token: string,
+  after: number,
+  signal?: AbortSignal,
+): Promise<PollLiveSignalsResponse> {
+  const parameters = new URLSearchParams({
+    token,
+    after: String(after),
+  });
+  const body = await requestJson(
+    `/api/live-sessions/${encodeURIComponent(code)}/signals?${parameters}`,
+    { signal },
+  );
+  if (!isPollLiveSignalsResponse(body)) {
+    throw new ApiClientError(
+      "실시간 연결 상태를 확인하지 못했어요.",
+      "INVALID_RESPONSE",
+    );
+  }
+  return body;
+}
+
+export async function closeLiveSession(
+  code: string,
+  token: string,
+): Promise<void> {
+  const parameters = new URLSearchParams({ token });
+  let response: Response;
+  try {
+    response = await fetch(
+      `/api/live-sessions/${encodeURIComponent(code)}?${parameters}`,
+      { method: "DELETE", keepalive: true },
+    );
+  } catch {
+    return;
+  }
+  if (!response.ok && response.status !== 404) {
+    const body = (await response.json().catch(() => null)) as unknown;
+    throw toApiError(body, response.status);
+  }
+}
+
+async function requestJson(path: string, init: RequestInit): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      headers: { Accept: "application/json", ...init.headers },
+    });
+  } catch {
+    if (init.signal?.aborted) {
+      throw new ApiClientError("요청을 취소했어요.", "REQUEST_ABORTED");
+    }
+    throw new ApiClientError(
+      "연결할 수 없어요. 잠시 후 다시 시도해 주세요.",
+      "NETWORK_ERROR",
+    );
+  }
+
+  const body = (await response.json().catch(() => null)) as unknown;
+  if (!response.ok) {
+    throw toApiError(body, response.status);
+  }
+  return body;
+}
+
 function isShareResponse(value: unknown): value is ShareResponse {
   return (
     typeof value === "object" &&
@@ -121,6 +256,60 @@ function isShareResponse(value: unknown): value is ShareResponse {
     "files" in value &&
     Array.isArray(value.files)
   );
+}
+
+function isCreateLiveSessionResponse(
+  value: unknown,
+): value is CreateLiveSessionResponse {
+  return (
+    isRecord(value) &&
+    typeof value.code === "string" &&
+    typeof value.liveUrl === "string" &&
+    typeof value.expiresAt === "string" &&
+    typeof value.senderToken === "string" &&
+    Array.isArray(value.iceServers)
+  );
+}
+
+function isResolveCodeResponse(value: unknown): value is ResolveCodeResponse {
+  return (
+    isRecord(value) &&
+    typeof value.code === "string" &&
+    (value.kind === "stored" || value.kind === "live")
+  );
+}
+
+function isJoinLiveSessionResponse(
+  value: unknown,
+): value is JoinLiveSessionResponse {
+  return (
+    isRecord(value) &&
+    typeof value.code === "string" &&
+    typeof value.expiresAt === "string" &&
+    typeof value.receiverToken === "string" &&
+    Array.isArray(value.iceServers)
+  );
+}
+
+function isPollLiveSignalsResponse(
+  value: unknown,
+): value is PollLiveSignalsResponse {
+  return (
+    isRecord(value) &&
+    typeof value.expiresAt === "string" &&
+    Array.isArray(value.messages) &&
+    value.messages.every(
+      (message) =>
+        isRecord(message) &&
+        typeof message.sequence === "number" &&
+        isRecord(message.signal) &&
+        typeof message.signal.type === "string",
+    )
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function toApiError(value: unknown, status: number): ApiClientError {
