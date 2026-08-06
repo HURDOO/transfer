@@ -36,6 +36,12 @@ async function main() {
     201,
   );
   assertShare(created);
+  if (
+    typeof created.managementToken !== "string" ||
+    !/^[A-Za-z0-9_-]{32}$/.test(created.managementToken)
+  ) {
+    throw new Error("The create response did not include a management token.");
+  }
   if (created.text !== sharedText || created.files.length !== fixtures.length) {
     throw new Error("The create response did not preserve all smoke fixtures.");
   }
@@ -46,7 +52,8 @@ async function main() {
     200,
   );
   assertShare(retrieved);
-  if (JSON.stringify(retrieved) !== JSON.stringify(created)) {
+  const { managementToken, ...publicCreated } = created;
+  if (JSON.stringify(retrieved) !== JSON.stringify(publicCreated)) {
     throw new Error("The retrieved share does not match the create response.");
   }
 
@@ -66,6 +73,23 @@ async function main() {
     }
   }
 
+  await requestJson(
+    new URL(`/api/shares/${created.code}`, apiBaseUrl),
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${managementToken}` },
+    },
+    204,
+  );
+  const deletedResponse = await fetch(
+    new URL(`/api/shares/${created.code}`, apiBaseUrl),
+  );
+  if (deletedResponse.status !== 404) {
+    throw new Error(
+      `Deleted share lookup returned HTTP ${deletedResponse.status}.`,
+    );
+  }
+
   console.log(
     JSON.stringify(
       {
@@ -74,6 +98,7 @@ async function main() {
         shareUrl: created.shareUrl,
         files: created.files.map((file) => file.name),
         expiresAt: created.expiresAt,
+        deleted: true,
       },
       null,
       2,

@@ -21,6 +21,7 @@ import {
   isExpirationValue,
   type ApiErrorResponse,
   type CreateLiveSessionResponse,
+  type CreateShareResponse,
   type ExpirationValue,
   type JoinLiveSessionResponse,
   type LiveClientSignal,
@@ -41,6 +42,7 @@ import {
 } from "./errors.js";
 import { LiveSessionStore } from "./live-session-store.js";
 import {
+  createManagementToken,
   sanitizeFileName,
   ShareStore,
   type ShareReservation,
@@ -432,6 +434,7 @@ export async function buildApp(
 
       const responseBaseUrl = getBaseUrl(request, appBaseUrl);
       const reservation = await store.reserve();
+      const managementToken = createManagementToken();
 
       let share: StoredShare;
       try {
@@ -452,6 +455,7 @@ export async function buildApp(
           text: state.text,
           totalBytes: state.totalBytes,
           files: state.files,
+          managementToken,
         });
       } catch (error) {
         await store.abort(reservation).catch((cleanupError: unknown) => {
@@ -463,7 +467,10 @@ export async function buildApp(
         throw error;
       }
 
-      const response = toShareResponse(share, responseBaseUrl);
+      const response: CreateShareResponse = {
+        ...toShareResponse(share, responseBaseUrl),
+        managementToken,
+      };
       return reply.code(201).send(response);
     },
   );
@@ -478,6 +485,28 @@ export async function buildApp(
     async (request) => {
       const share = await findShare(store, request.params.code);
       return toShareResponse(share, getBaseUrl(request, appBaseUrl));
+    },
+  );
+
+  app.delete<{ Params: ShareParams }>(
+    "/api/shares/:code",
+    {
+      config: useRateLimit
+        ? { rateLimit: { max: 30, timeWindow: "1 minute" } }
+        : undefined,
+    },
+    async (request, reply) => {
+      ensureSixDigitCode(request.params.code);
+      const managementToken = parseManagementToken(
+        request.headers.authorization,
+      );
+      const removed = await store.removeManagedShare(
+        request.params.code,
+        managementToken,
+      );
+      if (!removed) throw shareNotFound();
+      reply.header("Cache-Control", "no-store");
+      return reply.code(204).send();
     },
   );
 
@@ -736,6 +765,12 @@ function ensureSixDigitCode(code: string): void {
   if (!CODE_PATTERN.test(code)) {
     throw invalidInput("6자리 숫자를 입력해 주세요.");
   }
+}
+
+function parseManagementToken(authorization: string | undefined): string {
+  const match = authorization?.match(/^Bearer ([A-Za-z0-9_-]{32})$/);
+  if (!match) throw shareNotFound();
+  return match[1];
 }
 
 function parseLiveSignalRequest(body: unknown): {

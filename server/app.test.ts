@@ -12,6 +12,7 @@ import {
   MAX_TEXT_BYTES,
   type ApiErrorResponse,
   type CreateLiveSessionResponse,
+  type CreateShareResponse,
   type JoinLiveSessionResponse,
   type LiveClientSignal,
   type PollLiveSignalsResponse,
@@ -117,7 +118,9 @@ describe("share API", () => {
     });
 
     expect(createResponse.statusCode).toBe(201);
-    const created = createResponse.json<ShareResponse>();
+    const created = createResponse.json<CreateShareResponse>();
+    const { managementToken, ...publicShare } = created;
+    expect(managementToken).toMatch(/^[A-Za-z0-9_-]{32}$/);
     expect(created.code).toMatch(/^\d{6}$/);
     expect(created.shareUrl).toBe(`https://transfer.test/s/${created.code}`);
     expect(created.text).toBe(text);
@@ -143,7 +146,7 @@ describe("share API", () => {
       url: `/api/shares/${created.code}`,
     });
     expect(lookupResponse.statusCode).toBe(200);
-    expect(lookupResponse.json<ShareResponse>()).toEqual(created);
+    expect(lookupResponse.json<ShareResponse>()).toEqual(publicShare);
 
     for (const [index, file] of created.files.entries()) {
       const downloadResponse = await app.inject({
@@ -194,6 +197,67 @@ describe("share API", () => {
     const created = responses.map((response) => response.json<ShareResponse>());
     expect(new Set(created.map((share) => share.code)).size).toBe(8);
     expect(readShareCount(storageDirectory)).toBe(8);
+  });
+
+  it("deletes a stored share only with its one-time management token", async () => {
+    const app = await createApp();
+    const storageDirectory = storageDirectories.at(-1)!;
+    const fileContents = Buffer.from("delete-managed-share", "utf8");
+    const multipart = encodeMultipart(
+      [{ name: "expiresIn", value: "never" }],
+      [
+        {
+          name: "files",
+          fileName: "managed.txt",
+          contentType: "text/plain",
+          contents: fileContents,
+        },
+      ],
+    );
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/shares",
+      headers: multipart.headers,
+      payload: multipart.payload,
+    });
+    const created = createResponse.json<CreateShareResponse>();
+    const fileUrl = created.files[0]!.downloadUrl;
+
+    const missingToken = await app.inject({
+      method: "DELETE",
+      url: `/api/shares/${created.code}`,
+    });
+    expect(missingToken.statusCode).toBe(404);
+
+    const wrongToken = await app.inject({
+      method: "DELETE",
+      url: `/api/shares/${created.code}`,
+      headers: { authorization: `Bearer ${"x".repeat(32)}` },
+    });
+    expect(wrongToken.statusCode).toBe(404);
+    expect(
+      (await app.inject({ method: "GET", url: `/api/shares/${created.code}` }))
+        .statusCode,
+    ).toBe(200);
+
+    const deleteResponse = await app.inject({
+      method: "DELETE",
+      url: `/api/shares/${created.code}`,
+      headers: { authorization: `Bearer ${created.managementToken}` },
+    });
+    expect(deleteResponse.statusCode).toBe(204);
+    expect(deleteResponse.headers["cache-control"]).toBe("no-store");
+    expect(readShareCount(storageDirectory)).toBe(0);
+
+    for (const url of [`/api/shares/${created.code}`, fileUrl]) {
+      const response = await app.inject({ method: "GET", url });
+      expect(response.statusCode).toBe(404);
+    }
+    const resolveResponse = await app.inject({
+      method: "GET",
+      url: `/api/codes/${created.code}`,
+    });
+    expect(resolveResponse.statusCode).toBe(404);
   });
 
   it("resolves one receive code and keeps stored and live codes unique", async () => {

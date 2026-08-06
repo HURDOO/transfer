@@ -9,10 +9,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  createManagementToken,
   createShareCode,
   sanitizeFileName,
   ShareStore,
@@ -170,6 +172,82 @@ describe("ShareStore", () => {
     expect(store.hasActiveCode("invalid")).toBe(false);
   });
 
+  it("removes a share only when its management token matches", async () => {
+    const directory = await createStorageDirectory();
+    const store = track(
+      new ShareStore(directory, {
+        now: () => FIXED_TIME,
+        codeGenerator: () => "710001",
+      }),
+    );
+    const managementToken = createManagementToken();
+    const reservation = await store.reserve();
+    const created = await store.commit(reservation, {
+      createdAt: new Date(FIXED_TIME).toISOString(),
+      expiresAt: null,
+      text: "managed",
+      totalBytes: 7,
+      files: [],
+      managementToken,
+    });
+
+    await expect(
+      store.removeManagedShare(created.code, "x".repeat(32)),
+    ).resolves.toBe(false);
+    await expect(store.get(created.code)).resolves.toEqual(created);
+    await expect(
+      store.removeManagedShare(created.code, managementToken),
+    ).resolves.toBe(true);
+    await expect(store.get(created.code)).resolves.toBeNull();
+  });
+
+  it("migrates schema version 1 before creating managed shares", async () => {
+    const directory = await createStorageDirectory();
+    const database = new DatabaseSync(path.join(directory, "transfer.sqlite3"));
+    database.exec(`
+      CREATE TABLE shares (
+        id TEXT PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        expires_at TEXT,
+        shared_text TEXT,
+        total_bytes INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE share_files (
+        id TEXT PRIMARY KEY,
+        share_id TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+        original_name TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        mime_type TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        UNIQUE(share_id, ordinal)
+      ) STRICT;
+      PRAGMA user_version = 1;
+    `);
+    database.close();
+
+    const store = track(
+      new ShareStore(directory, {
+        now: () => FIXED_TIME,
+        codeGenerator: () => "710002",
+      }),
+    );
+    const managementToken = createManagementToken();
+    const reservation = await store.reserve();
+    const created = await store.commit(reservation, {
+      createdAt: new Date(FIXED_TIME).toISOString(),
+      expiresAt: null,
+      text: "migrated",
+      totalBytes: 8,
+      files: [],
+      managementToken,
+    });
+
+    await expect(
+      store.removeManagedShare(created.code, managementToken),
+    ).resolves.toBe(true);
+  });
+
   it("removes crash orphans immediately during startup cleanup", async () => {
     const directory = await createStorageDirectory();
     const store = track(new ShareStore(directory, { now: () => FIXED_TIME }));
@@ -268,6 +346,10 @@ describe("share storage helpers", () => {
     for (let index = 0; index < 100; index += 1) {
       expect(createShareCode()).toMatch(/^\d{6}$/);
     }
+  });
+
+  it("creates URL-safe management tokens", () => {
+    expect(createManagementToken()).toMatch(/^[A-Za-z0-9_-]{32}$/);
   });
 
   it("keeps only a safe leaf filename and supplies a fallback", () => {

@@ -1,6 +1,7 @@
 import type {
   ApiErrorResponse,
   CreateLiveSessionResponse,
+  CreateShareResponse,
   ExpirationValue,
   JoinLiveSessionResponse,
   LiveClientSignal,
@@ -28,7 +29,7 @@ interface CreateShareInput {
 }
 
 interface UploadOperation {
-  promise: Promise<ShareResponse>;
+  promise: Promise<CreateShareResponse>;
   abort: () => void;
 }
 
@@ -44,7 +45,7 @@ export function createShare(
   }
   input.files.forEach((file) => formData.append("files", file, file.name));
 
-  const promise = new Promise<ShareResponse>((resolve, reject) => {
+  const promise = new Promise<CreateShareResponse>((resolve, reject) => {
     request.open("POST", "/api/shares");
     request.responseType = "json";
 
@@ -57,11 +58,11 @@ export function createShare(
     });
     request.addEventListener("load", () => {
       const response = request.response as
-        ShareResponse | ApiErrorResponse | null;
+        CreateShareResponse | ApiErrorResponse | null;
       if (
         request.status >= 200 &&
         request.status < 300 &&
-        isShareResponse(response)
+        isCreateShareResponse(response)
       ) {
         onProgress(100);
         resolve(response);
@@ -115,6 +116,16 @@ export async function getShare(
     throw toApiError(body, response.status);
   }
   return body;
+}
+
+export async function deleteShare(
+  code: string,
+  managementToken: string,
+): Promise<void> {
+  await requestJson(`/api/shares/${encodeURIComponent(code)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${managementToken}` },
+  });
 }
 
 export async function resolveReceiveCode(
@@ -255,6 +266,15 @@ function isShareResponse(value: unknown): value is ShareResponse {
     typeof value.code === "string" &&
     "files" in value &&
     Array.isArray(value.files)
+  );
+}
+
+function isCreateShareResponse(value: unknown): value is CreateShareResponse {
+  return (
+    isShareResponse(value) &&
+    "managementToken" in value &&
+    typeof value.managementToken === "string" &&
+    /^[A-Za-z0-9_-]{32}$/.test(value.managementToken)
   );
 }
 

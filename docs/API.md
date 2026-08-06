@@ -59,11 +59,12 @@ curl --fail-with-body \
       "mimeType": "text/plain",
       "downloadUrl": "/api/shares/012345/files/파일 UUID"
     }
-  ]
+  ],
+  "managementToken": "abcdefghijklmnopqrstuvwxyzABCDEF"
 }
 ```
 
-`never`를 사용하면 `expiresAt`은 `null`이다. 코드는 선행 0을 포함할 수 있으므로 숫자가 아니라 6자리 문자열로 다룬다.
+`never`를 사용하면 `expiresAt`은 `null`이다. 코드는 선행 0을 포함할 수 있으므로 숫자가 아니라 6자리 문자열로 다룬다. `managementToken`은 생성 응답에서만 한 번 노출되며 조회 응답, 공유 링크와 서버 로그에는 포함되지 않는다.
 
 ## 받기 코드 판별
 
@@ -94,7 +95,19 @@ curl --fail-with-body \
   http://127.0.0.1:3000/api/shares/012345
 ```
 
-`GET /api/shares/:code`는 생성 응답과 같은 형태를 반환한다. 존재하지 않거나 만료된 공유는 `404`다.
+`GET /api/shares/:code`는 생성 응답에서 `managementToken`을 제외한 공개 공유 형태를 반환한다. 존재하지 않거나 만료된 공유는 `404`다.
+
+## 공유 즉시 삭제
+
+생성 응답의 관리 키를 Bearer 인증 헤더로 보낸다.
+
+```bash
+curl --fail-with-body -X DELETE \
+  -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyzABCDEF' \
+  http://127.0.0.1:3000/api/shares/012345
+```
+
+성공은 본문 없는 `204`이며 메타데이터, 파일 본문과 코드가 즉시 사라진다. 관리 키는 URL이나 쿼리 문자열에 넣지 않는다. 키가 없거나 틀렸거나 공유가 이미 만료·삭제된 경우 모두 `404 SHARE_NOT_FOUND`를 반환한다. 이는 공유 존재 여부와 관리 권한을 구분해 노출하지 않기 위한 동작이다.
 
 ## 파일 다운로드
 

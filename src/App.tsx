@@ -15,6 +15,7 @@ import {
   MAX_SHARE_BYTES,
   MAX_TEXT_BYTES,
   type CreateLiveSessionResponse,
+  type CreateShareResponse,
   type ExpirationValue,
   type ResolveCodeResponse,
   type ShareResponse,
@@ -24,6 +25,7 @@ import {
   closeLiveSession,
   createLiveSession,
   createShare,
+  deleteShare,
   getShare,
   joinLiveSession,
   resolveReceiveCode,
@@ -42,13 +44,25 @@ import {
   type LiveReceivedPayload,
 } from "./live-transfer-protocol";
 import { getNextExpirationDelay, hasExpirationPassed } from "./expiration";
+import {
+  createLiveTransferRecord,
+  createStoredTransferRecord,
+  listSentTransfers,
+  reconcileTransferExpiration,
+  removeSentTransferRecord,
+  saveSentTransfer,
+  type SentTransferRecord,
+} from "./share-history";
 
 type Theme = "light" | "dark";
 type HomeMode = "send" | "receive";
 type ContentMode = "files" | "text";
 type TransferMode = "stored" | "live";
 type AppRoute =
-  { kind: "stored"; code: string } | { kind: "live"; code: string } | null;
+  | { kind: "stored"; code: string }
+  | { kind: "live"; code: string }
+  | { kind: "history" }
+  | null;
 
 const EXPIRATION_OPTIONS: Array<{ value: ExpirationValue; label: string }> = [
   { value: "1h", label: "1시간" },
@@ -107,9 +121,16 @@ export default function App() {
         theme={theme}
         onToggleTheme={() => setTheme(theme === "light" ? "dark" : "light")}
         onHome={() => navigateHome()}
+        onHistory={() => navigate("/history")}
+        historyActive={route?.kind === "history"}
       />
       <main>
-        {route?.kind === "stored" ? (
+        {route?.kind === "history" ? (
+          <HistoryView
+            onSend={() => navigateHome()}
+            onOpenShare={(code) => navigate(`/s/${code}`)}
+          />
+        ) : route?.kind === "stored" ? (
           <ShareView
             key={`stored-${route.code}`}
             code={route.code}
@@ -144,10 +165,14 @@ function Header({
   theme,
   onToggleTheme,
   onHome,
+  onHistory,
+  historyActive,
 }: {
   theme: Theme;
   onToggleTheme: () => void;
   onHome: () => void;
+  onHistory: () => void;
+  historyActive: boolean;
 }) {
   return (
     <header className="site-header">
@@ -158,16 +183,27 @@ function Header({
           </span>
           <span>옮기기</span>
         </button>
-        <button
-          className="icon-button"
-          type="button"
-          onClick={onToggleTheme}
-          aria-label={
-            theme === "light" ? "어두운 화면으로 전환" : "밝은 화면으로 전환"
-          }
-        >
-          {theme === "light" ? <MoonIcon /> : <SunIcon />}
-        </button>
+        <div className="header-actions">
+          <button
+            className={`header-history-button${historyActive ? " active" : ""}`}
+            type="button"
+            onClick={onHistory}
+            aria-current={historyActive ? "page" : undefined}
+          >
+            <HistoryIcon />
+            <span>기록장</span>
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={onToggleTheme}
+            aria-label={
+              theme === "light" ? "어두운 화면으로 전환" : "밝은 화면으로 전환"
+            }
+          >
+            {theme === "light" ? <MoonIcon /> : <SunIcon />}
+          </button>
+        </div>
       </div>
     </header>
   );
@@ -261,7 +297,8 @@ function SendFlow({ onBusyChange }: { onBusyChange: (busy: boolean) => void }) {
   const [dragActive, setDragActive] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ShareResponse | null>(null);
+  const [result, setResult] = useState<CreateShareResponse | null>(null);
+  const [historyWarning, setHistoryWarning] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<(() => void) | null>(null);
@@ -332,6 +369,13 @@ function SendFlow({ onBusyChange }: { onBusyChange: (busy: boolean) => void }) {
 
     try {
       const share = await operation.promise;
+      try {
+        await saveSentTransfer(createStoredTransferRecord(share));
+      } catch {
+        setHistoryWarning(
+          "공유는 만들었지만 이 브라우저의 기록장에 저장하지 못했어요. 이 공유는 기록장에서 직접 관리할 수 없어요.",
+        );
+      }
       setResult(share);
     } catch (caught) {
       const message =
@@ -353,11 +397,19 @@ function SendFlow({ onBusyChange }: { onBusyChange: (busy: boolean) => void }) {
     setProgress(0);
     setError(null);
     setResult(null);
+    setHistoryWarning(null);
     setContentMode("files");
   };
 
   if (result) {
-    return <ShareResult key={result.code} share={result} onReset={reset} />;
+    return (
+      <ShareResult
+        key={result.code}
+        share={result}
+        historyWarning={historyWarning}
+        onReset={reset}
+      />
+    );
   }
 
   return (
@@ -600,6 +652,7 @@ function LiveSendFlow({
   const [creating, setCreating] = useState(false);
   const [transfer, setTransfer] = useState<{
     session: CreateLiveSessionResponse;
+    createdAt: string;
     text: string;
     files: File[];
   } | null>(null);
@@ -611,6 +664,8 @@ function LiveSendFlow({
     currentFileName: null,
   });
   const [error, setError] = useState<string | null>(null);
+  const [historyWarning, setHistoryWarning] = useState<string | null>(null);
+  const historyRecordedRef = useRef(false);
   const controllerRef = useRef<LivePeerController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileBytes = useMemo(
@@ -627,6 +682,22 @@ function LiveSendFlow({
       onStatus: (nextStatus) => {
         setStatus(nextStatus);
         if (nextStatus === "sent") {
+          if (!historyRecordedRef.current) {
+            historyRecordedRef.current = true;
+            const record = createLiveTransferRecord({
+              createdAt: transfer.createdAt,
+              fileNames: transfer.files.map((file) => file.name),
+              textIncluded: transfer.text.trim().length > 0,
+              totalBytes:
+                transfer.files.reduce((sum, file) => sum + file.size, 0) +
+                new Blob([transfer.text]).size,
+            });
+            void saveSentTransfer(record).catch(() => {
+              setHistoryWarning(
+                "전송은 끝났지만 이 브라우저의 기록장에는 남기지 못했어요.",
+              );
+            });
+          }
           setCompleted(true);
           setTransfer(null);
           setFiles([]);
@@ -700,7 +771,13 @@ function LiveSendFlow({
     onBusyChange(true);
     try {
       const session = await createLiveSession();
-      setTransfer({ session, text, files: [...files] });
+      historyRecordedRef.current = false;
+      setTransfer({
+        session,
+        createdAt: new Date().toISOString(),
+        text,
+        files: [...files],
+      });
     } catch (caught) {
       setError(
         caught instanceof ApiClientError
@@ -724,11 +801,19 @@ function LiveSendFlow({
     setCompleted(false);
     setProgress({ loadedBytes: 0, totalBytes: 0, currentFileName: null });
     setError(null);
+    setHistoryWarning(null);
+    historyRecordedRef.current = false;
     onBusyChange(false);
   };
 
   if (completed || status === "sent") {
-    return <TerminalView kind="live-complete" onAction={reset} />;
+    return (
+      <TerminalView
+        kind="live-complete"
+        notice={historyWarning}
+        onAction={reset}
+      />
+    );
   }
 
   if (transfer) {
@@ -1119,11 +1204,13 @@ function TerminalView({
   onAction,
   standalone = false,
   actionLabel,
+  notice,
 }: {
   kind: "stored-expired" | "live-complete";
   onAction: () => void;
   standalone?: boolean;
   actionLabel?: string;
+  notice?: string | null;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const liveComplete = kind === "live-complete";
@@ -1161,6 +1248,12 @@ function TerminalView({
           ? "수신 확인을 받았고 연결 코드도 닫았어요."
           : "공유 코드와 저장된 항목은 더 이상 열 수 없어요."}
       </p>
+      {notice && (
+        <div className="inline-error" role="alert">
+          <AlertIcon />
+          <span>{notice}</span>
+        </div>
+      )}
       <button className="primary-button" type="button" onClick={onAction}>
         {actionLabel ?? "다른 항목 보내기"}
       </button>
@@ -1303,11 +1396,334 @@ function ReceiveForm({
   );
 }
 
+function HistoryView({
+  onSend,
+  onOpenShare,
+}: {
+  onSend: () => void;
+  onOpenShare: (code: string) => void;
+}) {
+  const [records, setRecords] = useState<SentTransferRecord[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const load = async () => {
+      try {
+        const storedRecords = await listSentTransfers();
+        const reconciledRecords = storedRecords.map((record) =>
+          reconcileTransferExpiration(record),
+        );
+        const changedRecords = reconciledRecords.filter(
+          (record, index) => record !== storedRecords[index],
+        );
+        await Promise.all(changedRecords.map(saveSentTransfer));
+        if (active) {
+          setRecords(reconciledRecords);
+          setError(null);
+        }
+      } catch {
+        if (active) {
+          setRecords([]);
+          setError(
+            "이 브라우저의 기록장을 열지 못했어요. 브라우저 저장소 설정을 확인해 주세요.",
+          );
+        }
+      }
+    };
+
+    void load();
+    const reload = () => void load();
+    window.addEventListener("focus", reload);
+    document.addEventListener("visibilitychange", reload);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", reload);
+      document.removeEventListener("visibilitychange", reload);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
+
+  const markUnavailable = async (record: SentTransferRecord) => {
+    const nextRecord: SentTransferRecord = {
+      ...record,
+      status: hasExpirationPassed(record.expiresAt) ? "expired" : "deleted",
+      code: null,
+      managementToken: null,
+    };
+    setRecords(
+      (current) =>
+        current?.map((item) => (item.id === record.id ? nextRecord : item)) ??
+        [],
+    );
+    try {
+      await saveSentTransfer(nextRecord);
+    } catch {
+      setError(
+        "서버의 공유는 지웠지만 기록장 상태를 저장하지 못했어요. 페이지를 새로 열면 다시 표시될 수 있어요.",
+      );
+    }
+  };
+
+  const deleteStoredShare = async (record: SentTransferRecord) => {
+    if (!record.code || !record.managementToken) return;
+    setDeletingId(record.id);
+    setError(null);
+    try {
+      await deleteShare(record.code, record.managementToken);
+      await markUnavailable(record);
+      setConfirmingId(null);
+    } catch (caught) {
+      if (caught instanceof ApiClientError && caught.status === 404) {
+        await markUnavailable(record);
+        setConfirmingId(null);
+      } else {
+        setError(
+          caught instanceof ApiClientError
+            ? caught.message
+            : "공유를 지우지 못했어요. 잠시 후 다시 시도해 주세요.",
+        );
+      }
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const removeLocalRecord = async (record: SentTransferRecord) => {
+    setError(null);
+    try {
+      await removeSentTransferRecord(record.id);
+      setRecords(
+        (current) => current?.filter((item) => item.id !== record.id) ?? [],
+      );
+    } catch {
+      setError("기록을 지우지 못했어요. 잠시 후 다시 시도해 주세요.");
+    }
+  };
+
+  const copyManagementToken = async (record: SentTransferRecord) => {
+    if (!record.managementToken) return;
+    setError(null);
+    try {
+      await copyText(record.managementToken);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      setCopiedId(record.id);
+      copyTimerRef.current = window.setTimeout(() => setCopiedId(null), 1_600);
+    } catch {
+      setError("관리 키를 복사하지 못했어요.");
+    }
+  };
+
+  return (
+    <section className="transfer-panel history-panel">
+      <div className="history-heading">
+        <p className="eyebrow">이 브라우저에만 저장</p>
+        <h1 ref={headingRef} tabIndex={-1}>
+          보낸 기록
+        </h1>
+        <p>
+          이 기기에서 보낸 항목만 보여요. 서버 보관 공유는 여기서 바로 지울 수
+          있어요.
+        </p>
+      </div>
+
+      <div className="history-local-note" role="note">
+        <HistoryIcon />
+        <span>
+          계정이나 서버 전체 목록이 아니에요. 브라우저 데이터를 지우거나 다른
+          기기를 쓰면 기록이 보이지 않아요.
+        </span>
+      </div>
+
+      {error && (
+        <div className="inline-error" role="alert">
+          <AlertIcon />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {records === null ? (
+        <div className="history-empty" role="status">
+          기록을 불러오고 있어요.
+        </div>
+      ) : records.length === 0 ? (
+        <div className="history-empty">
+          <span className="large-status-icon" aria-hidden="true">
+            <HistoryIcon />
+          </span>
+          <strong>아직 보낸 기록이 없어요</strong>
+          <span>이 브라우저에서 새로 보내면 여기에 남아요.</span>
+          <button className="primary-button" type="button" onClick={onSend}>
+            항목 보내기
+          </button>
+        </div>
+      ) : (
+        <ul className="history-list">
+          {records.map((record) => {
+            const canManage =
+              record.kind === "stored" &&
+              record.status === "active" &&
+              record.code !== null &&
+              record.managementToken !== null;
+            return (
+              <li className="history-card" key={record.id}>
+                <div className="history-card-heading">
+                  <div>
+                    <span className="history-kind">
+                      {record.kind === "stored" ? "서버에 보관" : "실시간 연결"}
+                    </span>
+                    <strong>{historyRecordTitle(record)}</strong>
+                  </div>
+                  <span className={`history-status ${record.status}`}>
+                    {historyStatusLabel(record.status)}
+                  </span>
+                </div>
+
+                <div className="history-meta">
+                  <span>{formatDate(record.createdAt)}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{formatBytes(record.totalBytes)}</span>
+                  {record.expiresAt && record.status === "active" && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span>{formatDate(record.expiresAt)}까지</span>
+                    </>
+                  )}
+                </div>
+
+                {record.fileNames.length > 0 && (
+                  <ul className="history-file-names" aria-label="보낸 파일">
+                    {record.fileNames.slice(0, 3).map((name, index) => (
+                      <li key={`${name}-${index}`}>{name}</li>
+                    ))}
+                    {record.fileNames.length > 3 && (
+                      <li>외 {record.fileNames.length - 3}개</li>
+                    )}
+                  </ul>
+                )}
+
+                {canManage && (
+                  <>
+                    <details className="history-management">
+                      <summary>고급 관리 · 삭제 관리 키 보기</summary>
+                      <div>
+                        <code>{record.managementToken}</code>
+                        <button
+                          className="secondary-button compact"
+                          type="button"
+                          onClick={() => void copyManagementToken(record)}
+                        >
+                          <CopyIcon />
+                          {copiedId === record.id ? "복사됨" : "관리 키 복사"}
+                        </button>
+                      </div>
+                      <p>
+                        이 키를 가진 사람은 이 공유를 서버에서 즉시 지울 수
+                        있어요.
+                      </p>
+                    </details>
+                    <div className="history-actions">
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        onClick={() => onOpenShare(record.code!)}
+                      >
+                        공유 열기
+                      </button>
+                      {confirmingId === record.id ? (
+                        <div className="history-delete-confirm" role="alert">
+                          <span>서버 파일과 코드를 지금 지울까요?</span>
+                          <button
+                            className="danger-button"
+                            type="button"
+                            disabled={deletingId === record.id}
+                            onClick={() => void deleteStoredShare(record)}
+                          >
+                            {deletingId === record.id ? "지우는 중…" : "지우기"}
+                          </button>
+                          <button
+                            className="text-button"
+                            type="button"
+                            disabled={deletingId === record.id}
+                            onClick={() => setConfirmingId(null)}
+                          >
+                            취소
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          className="danger-outline-button"
+                          type="button"
+                          onClick={() => setConfirmingId(record.id)}
+                        >
+                          서버에서 삭제
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {!canManage && (
+                  <button
+                    className="text-button history-remove-button"
+                    type="button"
+                    onClick={() => void removeLocalRecord(record)}
+                  >
+                    기록에서 지우기
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function historyRecordTitle(record: SentTransferRecord): string {
+  const parts: string[] = [];
+  if (record.fileNames.length > 0) {
+    parts.push(`파일 ${record.fileNames.length}개`);
+  }
+  if (record.textIncluded) parts.push("텍스트");
+  return parts.length > 0 ? parts.join(" · ") : "보낸 항목";
+}
+
+function historyStatusLabel(status: SentTransferRecord["status"]): string {
+  switch (status) {
+    case "active":
+      return "공유 중";
+    case "completed":
+      return "전송 완료";
+    case "expired":
+      return "만료됨";
+    case "deleted":
+      return "삭제됨";
+  }
+}
+
 function ShareResult({
   share,
+  historyWarning,
   onReset,
 }: {
-  share: ShareResponse;
+  share: CreateShareResponse;
+  historyWarning: string | null;
   onReset: () => void;
 }) {
   const [qrCode, setQrCode] = useState<string | null>(null);
@@ -1443,10 +1859,10 @@ function ShareResult({
         </div>
       </div>
 
-      {copyError && (
+      {(copyError || historyWarning) && (
         <div className="inline-error" role="alert">
           <AlertIcon />
-          <span>{copyError}</span>
+          <span>{copyError ?? historyWarning}</span>
         </div>
       )}
 
@@ -1939,6 +2355,9 @@ function ShareView({
 }
 
 function parseRoute(pathname: string): AppRoute {
+  if (/^\/history\/?$/.test(pathname)) {
+    return { kind: "history" };
+  }
   const storedCode = pathname.match(/^\/s\/(\d{6})\/?$/)?.[1];
   if (storedCode) {
     return { kind: "stored", code: storedCode };
@@ -2072,6 +2491,15 @@ function SunIcon() {
     <SvgIcon>
       <circle cx="12" cy="12" r="4" />
       <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42" />
+    </SvgIcon>
+  );
+}
+
+function HistoryIcon() {
+  return (
+    <SvgIcon>
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5M12 7v5l3 2" />
     </SvgIcon>
   );
 }

@@ -44,6 +44,10 @@ export interface ShareResponse {
   files: ShareFile[];
 }
 
+export interface CreateShareResponse extends ShareResponse {
+  managementToken: string;
+}
+
 export interface ApiErrorResponse {
   error: {
     code: string;

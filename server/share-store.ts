@@ -1,4 +1,10 @@
-import { randomInt, randomUUID } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  randomInt,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { mkdir, readdir, rename, rm, stat, utimes } from "node:fs/promises";
 import { DatabaseSync, type StatementResultingChanges } from "node:sqlite";
 import path from "node:path";
@@ -8,7 +14,9 @@ import { AppError } from "./errors.js";
 const CODE_PATTERN = /^\d{6}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SCHEMA_VERSION = 1;
+const MANAGEMENT_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32}$/;
+const MANAGEMENT_TOKEN_HASH_PATTERN = /^[0-9a-f]{64}$/;
+const SCHEMA_VERSION = 2;
 const DEFAULT_STALE_RESERVATION_MS = 60 * 60 * 1_000;
 
 const SCHEMA = `
@@ -19,7 +27,15 @@ const SCHEMA = `
     created_at TEXT NOT NULL,
     expires_at TEXT,
     shared_text TEXT,
-    total_bytes INTEGER NOT NULL CHECK(total_bytes >= 0)
+    total_bytes INTEGER NOT NULL CHECK(total_bytes >= 0),
+    management_token_hash TEXT
+      CHECK(
+        management_token_hash IS NULL OR
+        (
+          length(management_token_hash) = 64 AND
+          management_token_hash NOT GLOB '*[^0-9a-f]*'
+        )
+      )
   ) STRICT;
 
   CREATE TABLE share_files (
@@ -35,7 +51,19 @@ const SCHEMA = `
   CREATE INDEX shares_expires_at_index ON shares(expires_at)
     WHERE expires_at IS NOT NULL;
 
-  PRAGMA user_version = 1;
+  PRAGMA user_version = 2;
+`;
+
+const MIGRATE_SCHEMA_V1_TO_V2 = `
+  ALTER TABLE shares ADD COLUMN management_token_hash TEXT
+    CHECK(
+      management_token_hash IS NULL OR
+      (
+        length(management_token_hash) = 64 AND
+        management_token_hash NOT GLOB '*[^0-9a-f]*'
+      )
+    );
+  PRAGMA user_version = 2;
 `;
 
 export interface StoredFile {
@@ -66,6 +94,10 @@ interface ShareStoreOptions {
   codeGenerator?: () => string;
   isCodeUnavailable?: (code: string) => boolean;
   staleReservationMs?: number;
+}
+
+interface CommitShareMetadata extends Omit<StoredShare, "id" | "code"> {
+  managementToken?: string;
 }
 
 interface CleanupOptions {
@@ -144,6 +176,16 @@ export class ShareStore {
         database.close();
         throw error;
       }
+    } else if (schemaVersion === 1) {
+      try {
+        database.exec(`BEGIN IMMEDIATE; ${MIGRATE_SCHEMA_V1_TO_V2} COMMIT;`);
+      } catch (error) {
+        if (database.isTransaction) {
+          database.exec("ROLLBACK");
+        }
+        database.close();
+        throw error;
+      }
     } else if (schemaVersion !== SCHEMA_VERSION) {
       database.close();
       throw new Error(
@@ -185,11 +227,15 @@ export class ShareStore {
 
   async commit(
     reservation: ShareReservation,
-    metadata: Omit<StoredShare, "id" | "code">,
+    metadata: CommitShareMetadata,
     maxCodeAttempts = 40,
   ): Promise<StoredShare> {
     const database = this.getDatabase();
     const finalDirectory = path.join(this.filesDirectory, reservation.id);
+    const { managementToken, ...shareMetadata } = metadata;
+    const managementTokenHash = managementToken
+      ? hashManagementToken(managementToken)
+      : null;
 
     try {
       await rename(reservation.temporaryDirectory, finalDirectory);
@@ -211,17 +257,19 @@ export class ShareStore {
             .prepare(
               `
                 INSERT OR IGNORE INTO shares (
-                  id, code, created_at, expires_at, shared_text, total_bytes
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                  id, code, created_at, expires_at, shared_text, total_bytes,
+                  management_token_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
               `,
             )
             .run(
               reservation.id,
               code,
-              metadata.createdAt,
-              metadata.expiresAt,
-              metadata.text,
-              metadata.totalBytes,
+              shareMetadata.createdAt,
+              shareMetadata.expiresAt,
+              shareMetadata.text,
+              shareMetadata.totalBytes,
+              managementTokenHash,
             );
 
           if (!didChange(insertResult)) {
@@ -236,7 +284,7 @@ export class ShareStore {
               ) VALUES (?, ?, ?, ?, ?, ?)
             `,
           );
-          metadata.files.forEach((file, ordinal) => {
+          shareMetadata.files.forEach((file, ordinal) => {
             insertFile.run(
               file.id,
               reservation.id,
@@ -251,7 +299,7 @@ export class ShareStore {
           return {
             id: reservation.id,
             code,
-            ...metadata,
+            ...shareMetadata,
           };
         } catch (error) {
           if (database.isTransaction) {
@@ -351,6 +399,59 @@ export class ShareStore {
     return isNullableString(expiresAt) && !isExpired(expiresAt, this.now());
   }
 
+  async removeManagedShare(
+    code: string,
+    managementToken: string,
+  ): Promise<boolean> {
+    if (
+      !CODE_PATTERN.test(code) ||
+      !MANAGEMENT_TOKEN_PATTERN.test(managementToken)
+    ) {
+      return false;
+    }
+
+    const rawShare = this.getDatabase()
+      .prepare(
+        "SELECT id, expires_at, management_token_hash FROM shares WHERE code = ?",
+      )
+      .get(code);
+    if (!rawShare || !isRecord(rawShare)) return false;
+
+    const id = rawShare.id;
+    const expiresAt = rawShare.expires_at;
+    const expectedHash = rawShare.management_token_hash;
+    if (
+      typeof id !== "string" ||
+      !isNullableString(expiresAt) ||
+      (expectedHash !== null && typeof expectedHash !== "string")
+    ) {
+      throw new Error("SQLite returned invalid managed share metadata.");
+    }
+    if (isExpired(expiresAt, this.now())) {
+      await this.removeShare(id);
+      return false;
+    }
+    if (
+      expectedHash === null ||
+      !MANAGEMENT_TOKEN_HASH_PATTERN.test(expectedHash)
+    ) {
+      return false;
+    }
+
+    const actualHash = hashManagementToken(managementToken);
+    if (
+      !timingSafeEqual(
+        Buffer.from(actualHash, "hex"),
+        Buffer.from(expectedHash, "hex"),
+      )
+    ) {
+      return false;
+    }
+
+    await this.removeShare(id);
+    return true;
+  }
+
   getStoredFilePath(shareId: string, fileId: string): string | null {
     if (!UUID_PATTERN.test(shareId) || !UUID_PATTERN.test(fileId)) {
       return null;
@@ -447,6 +548,10 @@ export function createShareCode(): string {
   return randomInt(0, 1_000_000).toString().padStart(6, "0");
 }
 
+export function createManagementToken(): string {
+  return randomBytes(24).toString("base64url");
+}
+
 export function sanitizeFileName(input: string): string {
   const leafName = input.split(/[\\/]/).at(-1) ?? "";
   const withoutControls = Array.from(leafName)
@@ -508,6 +613,13 @@ function readStringColumn(value: unknown, column: string): string {
 
 function isExpired(expiresAt: string | null, now: number): boolean {
   return expiresAt !== null && Date.parse(expiresAt) <= now;
+}
+
+function hashManagementToken(token: string): string {
+  if (!MANAGEMENT_TOKEN_PATTERN.test(token)) {
+    throw new Error("The management token must be 32 URL-safe characters.");
+  }
+  return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
 function isNullableString(value: unknown): value is string | null {
