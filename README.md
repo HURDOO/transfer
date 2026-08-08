@@ -50,6 +50,21 @@ pnpm start
 pnpm smoke:api
 ```
 
+컨테이너와 deployd 온보딩 계약도 준비되어 있다. 이미지는 Raspberry Pi 대상인 `linux/arm64`로 빌드하며 로컬 데이터 대신 전용 `/data` 볼륨을 연결한다.
+
+```bash
+docker build --platform linux/arm64 -t transfer:local .
+docker run --rm \
+  --read-only --tmpfs /tmp:size=64m,mode=1777 \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  -p 127.0.0.1:3000:3000 \
+  -v transfer-data:/data \
+  -e APP_BASE_URL=http://127.0.0.1:3000 \
+  transfer:local
+```
+
+컨테이너와 deployd 헬스 체크는 `GET /healthz`를 사용한다. `deploy.json`은 `ghcr.io/hurdoo/transfer`, `linux/arm64`, `pnpm check`뿐 아니라 포트 3000, `/healthz`, private 접근, `/data`, `large-upload`를 사용자 검토용 배포 계약으로 고정한다. Codex는 ARM64 이미지를 GHCR에 게시하고 이 계약과 digest를 핸드오프 JSON으로 만들며, 실제 Pi 런타임·Nginx·인증서 생성과 첫 릴리스는 사용자가 deployd 대시보드에서 승인한다.
+
 ## 환경 변수
 
 - `PORT`: API/production 포트, 기본 `3000`

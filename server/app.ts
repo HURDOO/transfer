@@ -270,7 +270,9 @@ export async function buildApp(
     );
   });
 
-  app.get("/api/health", async () => ({ status: "ok" }));
+  const healthResponse = async () => ({ status: "ok" as const });
+  app.get("/api/health", healthResponse);
+  app.get("/healthz", healthResponse);
 
   app.get<{ Params: ShareParams }>(
     "/api/codes/:code",

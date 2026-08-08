@@ -85,6 +85,16 @@ describe("share API", () => {
     return app;
   }
 
+  it("exposes health checks for API clients and container orchestration", async () => {
+    const app = await createApp();
+
+    for (const url of ["/api/health", "/healthz"]) {
+      const response = await app.inject({ method: "GET", url });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ status: "ok" });
+    }
+  });
+
   it("creates, retrieves, and byte-identically downloads text with two files", async () => {
     const app = await createApp();
     const text = "두 파일과 함께 전달할 텍스트입니다.";

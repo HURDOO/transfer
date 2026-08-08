@@ -102,7 +102,11 @@ SQLite3의 `shares` 테이블은 공유 UUID, 고유한 6자리 코드, 생성·
 
 ## 배포와 롤백
 
-이번 범위는 로컬 실행까지다. 이후 Node LTS 기반 multi-stage ARM64 Docker 이미지와 `/data` 볼륨을 사용한다. 데이터 형식 변경 전에는 볼륨 백업과 버전별 마이그레이션·롤백 절차가 필요하다.
+Node 24.15 기반 multi-stage Dockerfile은 잠금 파일로 의존성을 설치하고 빌드 결과와 production 의존성만 담은 `linux/arm64` 이미지를 만든다. 런타임은 읽기 전용 루트, `/tmp` tmpfs, capability 제거와 `no-new-privileges`를 전제로 하며 SQLite와 파일은 `/data` 한 곳에만 쓴다. `GET /healthz`가 컨테이너와 deployd 헬스 계약이다.
+
+프로젝트의 `deploy.json`은 앱 ID `transfer`, 이미지 저장소 `ghcr.io/hurdoo/transfer`, 컨테이너 포트 3000, private 접근, `/data`, `large-upload`를 고정한다. Codex의 게시 도구는 이 계약과 immutable digest를 대시보드 핸드오프 JSON으로 만든다. 사용자가 승인하면 deployd가 정책 범위에서 Raspberry Pi 루프백 포트, `/srv/homelab/data/transfer` → `/data`, exact-host Nginx·인증서와 첫 릴리스를 자동 생성한다. 호스트 경로·포트·Compose·권한·비밀값은 프로젝트나 핸드오프가 지정할 수 없다.
+
+이미지 롤백은 SQLite나 파일 상태를 되돌리지 않는다. 데이터 형식 변경 전에는 전체 데이터 루트 백업과 버전별 마이그레이션·복구 승인이 필요하다.
 
 ## 알려진 위험
 

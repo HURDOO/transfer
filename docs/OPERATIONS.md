@@ -1,8 +1,22 @@
 # 운영 가이드
 
-상태: 신뢰할 수 있는 로컬 네트워크용, 공개 배포 시스템은 후속 작업
+상태: ARM64 이미지와 deployd 온보딩 정책 준비 완료, Pi 적용과 공개 운영은 미실행
 
-현재 서버는 제품 의도에 따라 로그인 없는 업로드·다운로드, 최대 1 GiB 요청, 무기한 만료를 지원한다. Docker와 인터넷 공개 배포 체계는 아직 범위 밖이므로 현재 구성을 공개 운영용으로 간주하지 않는다.
+현재 서버는 제품 의도에 따라 로그인 없는 업로드·다운로드, 최대 1 GiB 요청, 무기한 만료를 지원한다. Docker 이미지와 중앙 런타임 정책은 준비됐지만 실제 Pi 설치·TLS·첫 릴리스와 인터넷 공개 승인은 아직 하지 않았으므로 현재 구성을 공개 운영용으로 간주하지 않는다.
+
+## 배포 계약
+
+- 앱 ID: `transfer`
+- 이미지: `ghcr.io/hurdoo/transfer`, `linux/arm64`
+- 예정 URL: `https://transfer.app.hurdoo.kr`
+- 컨테이너 포트와 헬스: `3000`, `GET /healthz`
+- Pi 루프백 포트: deployd가 `18000`–`18999` 범위에서 자동 할당하며 프로젝트가 지정하지 않음
+- 영속 데이터: 호스트 `/srv/homelab/data/transfer` → 컨테이너 `/data`
+- 초기 접근 범위: `192.168.10.0/24`, `10.0.0.0/24`
+
+Compose는 rootless Docker의 컨테이너 UID 0을 사용한다. 이는 호스트 root가 아니라 `appdeploy` 사용자로 매핑되어 `appdeploy:appdeploy 0750` 데이터 디렉터리에 쓸 수 있게 하면서, 읽기 전용 루트·모든 capability 제거·`no-new-privileges`를 함께 유지하기 위한 선택이다.
+
+`LIVE_ICE_SERVERS`는 선택적인 Pi 전용 `/etc/homelab/secrets/transfer.env`에서 주입한다. 파일이 없으면 애플리케이션 기본값 `[]`를 사용하며, TURN 자격 증명은 저장소에 기록하지 않는다.
 
 ## 실행 범위
 
@@ -87,14 +101,24 @@ tar -C "$STORAGE_DIR" -czf transfer-backup-YYYYMMDD-HHMMSS.tar.gz .
 
 복구 검증 전 기존 저장 루트를 덮어쓰거나 지우지 않는다.
 
-## 후속 배포 시스템 범위
+## 준비된 항목과 남은 승인
 
-웹과 API의 익명 업로드·다운로드는 유지한다. Docker와 공개 배포는 현재 애플리케이션 작업과 분리해 다음 항목을 갖춘 뒤 진행한다.
+준비된 항목:
 
-- multi-stage, multi-arch Docker 이미지와 ARM64 smoke test
-- 읽기 전용 이미지와 영속 `/data` 볼륨
-- 디스크 quota와 동시 업로드 제한
-- reverse proxy 요청 크기/시간 제한과 TLS
+- 잠금 파일 기반 multi-stage Node 24.15 ARM64 이미지
+- 읽기 전용 루트와 `/data` 영속 볼륨 계약
+- deployd 사용자 검토용 앱 계약과 immutable 이미지 핸드오프
+- 1 GiB 업로드를 스트리밍하는 Nginx 크기·시간·버퍼 정책
+- 로컬 ARM64 build, health, API smoke, 재시작 영속성과 SIGTERM 검증
+
+다음 작업은 별도 승인 뒤 production 온보딩 절차로 진행한다.
+
+- Codex의 첫 이미지 registry 게시와 핸드오프 생성
+- 사용자의 deployd 대시보드 앱 설정 검토 및 첫 배포 승인
+- deployd가 파생한 Pi 디렉터리·Compose·Nginx·exact-host 인증서 확인
+- 컨테이너 재생성 영속성, 두 번째 릴리스와 수동 롤백 훈련
+- 운영 STUN/TURN을 사용한 두 일반 브라우저 실시간 smoke
+- 공개 범위 확대 전 디스크 quota와 동시 업로드 제한
 - 백업 보존 주기와 실제 복구 훈련
 - 용량 부족·요청 제한·프록시 중단 관측과 경보
 - 공개 서비스의 신고·차단·보존 기간 등 악용 대응 정책

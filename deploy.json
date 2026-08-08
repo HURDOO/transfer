@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "appId": "transfer",
+  "imageRepository": "ghcr.io/hurdoo/transfer",
+  "displayName": "옮기기",
+  "description": "개인 파일 및 텍스트 공유 서비스",
+  "containerPort": 3000,
+  "healthPath": "/healthz",
+  "access": "private",
+  "dataEnabled": true,
+  "ingressProfile": "large-upload",
+  "platform": "linux/arm64",
+  "dockerfile": "Dockerfile",
+  "context": ".",
+  "checks": [["pnpm", "check"]]
+}

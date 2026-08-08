@@ -251,7 +251,8 @@ curl --fail-with-body -X DELETE \
 ## 상태 확인
 
 ```bash
+curl --fail-with-body http://127.0.0.1:3000/healthz
 curl --fail-with-body http://127.0.0.1:3000/api/health
 ```
 
-정상 응답은 `{"status":"ok"}`다.
+컨테이너와 deployd는 인증 없는 `GET /healthz`의 `200 {"status":"ok"}` 응답을 사용한다. 기존 API 클라이언트를 위한 `GET /api/health`도 같은 응답을 유지한다.
