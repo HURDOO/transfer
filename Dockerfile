@@ -21,6 +21,7 @@ FROM dependencies AS production-dependencies
 RUN pnpm prune --prod
 
 FROM ${NODE_IMAGE} AS runtime
+LABEL org.opencontainers.image.source="https://github.com/HURDOO/transfer"
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=3000

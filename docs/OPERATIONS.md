@@ -18,6 +18,8 @@ Compose는 rootless Docker의 컨테이너 UID 0을 사용한다. 이는 호스�
 
 `LIVE_ICE_SERVERS`는 선택적인 Pi 전용 `/etc/homelab/secrets/transfer.env`에서 주입한다. 파일이 없으면 애플리케이션 기본값 `[]`를 사용하며, TURN 자격 증명은 저장소에 기록하지 않는다.
 
+`hurdoo` 개인 GHCR 네임스페이스의 첫 패키지는 저장소의 `Bootstrap GHCR package` Actions 워크플로를 수동 실행해 만든다. 워크플로는 저장소 전용 `GITHUB_TOKEN`의 `packages: write` 권한을 사용하고, 이미지를 `HURDOO/transfer`에 연결해 저장소 collaborator 권한을 상속시킨다. 첫 패키지 생성 뒤의 일반 릴리스는 Codex의 `deployctl publish transfer`가 `hurdooagent` 자격 증명으로 게시한다.
+
 ## 실행 범위
 
 맥미니 한 대에서만 확인할 때는 루프백에 고정한다.
@@ -108,6 +110,7 @@ tar -C "$STORAGE_DIR" -czf transfer-backup-YYYYMMDD-HHMMSS.tar.gz .
 - 잠금 파일 기반 multi-stage Node 24.15 ARM64 이미지
 - 읽기 전용 루트와 `/data` 영속 볼륨 계약
 - deployd 사용자 검토용 앱 계약과 immutable 이미지 핸드오프
+- 저장소 전용 토큰으로 최초 GHCR 패키지를 만드는 수동 Actions 워크플로
 - 1 GiB 업로드를 스트리밍하는 Nginx 크기·시간·버퍼 정책
 - 로컬 ARM64 build, health, API smoke, 재시작 영속성과 SIGTERM 검증
 

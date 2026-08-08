@@ -54,6 +54,7 @@
   - 익명 업로드·다운로드를 유지하면서 multi-arch Docker, 영속 볼륨, 디스크 quota, reverse proxy/TLS, 백업·복구를 구성한다.
   - ARM64 이미지의 로컬 smoke test를 통과한 뒤에만 공개 노출을 검토한다.
   - Node 24.15 multi-stage ARM64 Dockerfile, `/data` 영속 볼륨, `/healthz`, 사용자 검토용 프로젝트 `deploy.json` 계약을 준비했다. 호스트 Compose·Nginx·포트는 deployd가 대시보드 승인 뒤 중앙 정책에서 파생한다.
+  - 개인 계정 GHCR의 최초 패키지는 `packages: write` 저장소 토큰을 쓰는 수동 Actions 워크플로로 만들고, 저장소 연결 라벨을 통해 `hurdooagent` collaborator가 이후 불변 이미지를 게시할 수 있게 한다.
   - 로컬 ARM64 이미지에서 읽기 전용 루트, capability 제거, API smoke, SIGTERM 종료와 컨테이너 재시작 뒤 SQLite 영속성을 확인했다. production 정책 검증과 Compose 렌더 검증도 통과했다.
   - 실제 Pi 디렉터리·런타임 파일·Nginx·exact-host 인증서 설치와 첫 릴리스는 별도 인프라 승인을 기다린다. 공개 전에는 디스크 quota·동시 업로드 제한·관측·악용 대응이 추가로 필요하다.
   - 운영 STUN/TURN과 서로 다른 두 일반 브라우저의 실시간 파일 smoke를 배포 완료 조건에 포함한다.
